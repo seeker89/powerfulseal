@@ -13,15 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import print_function
 import cmd
 import shlex
-import random
-from datetime import datetime
-import json
 from termcolor import colored, cprint
 import sys
-import six
 
 try:
     import readline
@@ -30,7 +25,7 @@ except:
     pass
 
 from ..execute import (
-    RemoteExecutor,
+    SSHExecutor,
 )
 
 DEFAULT_COLOR_KEYWORDS = {
@@ -44,7 +39,11 @@ DEFAULT_COLOR_KEYWORDS = {
     "Succeeded": "green",
     "Pending": "grey",
     "Failed": "red",
-    "Unknown": "red"
+    "Unknown": "red",
+    "CrashLoopBackOff": "red",
+    "error": "red",
+    "Error": "red",
+    "namespace": "blue"
 }
 # couple of helpers
 def colour_output(output, extras=None):
@@ -121,6 +120,12 @@ class PSCmd(cmd.Cmd):
 
         return suggestions
 
+    def find_nodes(self, query):
+        nodes = list(self.inventory.find_nodes(query))
+        if not nodes:
+            print(colored("No matching hosts", "yellow"))
+        return nodes
+
     ###########################################################################
     # CLI control
     ###########################################################################
@@ -145,7 +150,7 @@ class PSCmd(cmd.Cmd):
             extras = {query: "blue"}
         else:
             extras = {}
-        for node in self.inventory.find_nodes(query):
+        for node in self.find_nodes(query):
             print(colour_output(str(node), extras))
 
     def do_sync(self, line):
@@ -174,7 +179,7 @@ class PSCmd(cmd.Cmd):
         Brings up a subset of machines
         """
         cmd = Command(line)
-        for node in self.inventory.find_nodes(cmd.get(0)):
+        for node in self.find_nodes(cmd.get(0)):
             print("Starting %s" % (node))
             try:
                 self.driver.start(node)
@@ -186,7 +191,7 @@ class PSCmd(cmd.Cmd):
         Brings down a subset of machines
         """
         cmd = Command(line)
-        for node in self.inventory.find_nodes(cmd.get(0)):
+        for node in self.find_nodes(cmd.get(0)):
             print("Stopping %s" % (node))
             try:
                 self.driver.stop(node)
@@ -204,14 +209,14 @@ class PSCmd(cmd.Cmd):
         cmd = Command(line)
         if cmd.get(0) is None:
             return print("Can't delete all machines at once. It's for your own good")
-        for node in self.inventory.find_nodes(cmd.get(0)):
+        for node in self.find_nodes(cmd.get(0)):
             print("About to PERMANENTLY DELETE THIS NODE: \n{node}".format(
                 node=colour_output(str(node))
             ))
             answer = None
             while answer not in ("yes", "no"):
                 sys.stdout.write("Proceed ? (yes|no): ")
-                answer = six.moves.input()
+                answer = input()
             if answer == "yes":
                 print("Deleting")
                 self.driver.delete(node)
@@ -258,7 +263,7 @@ class PSCmd(cmd.Cmd):
             exec <subset> "command -to 'execute'"
         """
         cmd = Command(line)
-        nodes = self.inventory.find_nodes(cmd.get(0))
+        nodes = self.find_nodes(cmd.get(0))
         command = " ".join(cmd.args[1:])
         if prefix is not None:
             command = prefix + " " + command
@@ -435,19 +440,13 @@ class PSCmd(cmd.Cmd):
         if pod.state == 'Pending':
             return print("Can't kill pod on pending state")
 
-        # find the node
-        node = self.inventory.get_node_by_ip(pod.host_ip)
-        if node is None:
-            return print("Node not found")
+        # check with the user
+        ans = False
+        while ans not in ("y", "n"):
+            print("Will delete pod '%s' through kubernetes API. Continue ? [y/n]: " % pod)
+            ans = input().lower()
+        if ans != "y":
+            return print("Cancelling")
 
-        # execute docker of the pod on the node
-        for container_id in pod.container_ids:
-            cmd = self.executor.get_kill_command(container_id.replace("docker://",""))
-            ans = False
-            while ans not in ("y", "n"):
-                print("Will execute '%s' on %s. Continue ? [y/n]: " % (cmd, node))
-                ans = six.moves.input().lower()
-            if ans != "y":
-                return print("Cancelling")
-            self.execute(cmd, [node])
-
+        # kill the pod
+        return self.executor.kill_pod(pod, self.inventory)

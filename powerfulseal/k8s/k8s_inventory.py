@@ -14,22 +14,29 @@
 # limitations under the License.
 
 
-import logging
+from powerfulseal import makeLogger
 from datetime import datetime
 from .pod import Pod
 
+
+def get_status(status):
+    # try to find the error reasons, if any
+    try:
+        reasons = [x.state.waiting.reason for x in status.container_statuses]
+        return ','.join(reasons)
+    except:
+        return status.phase
 
 class K8sInventory():
     """ Kubernetes inventory - deal with namespaces, deployments and pods.
         Also manages cache.
     """
 
-    def __init__(self, k8s_client, delete_pods=False, logger=None):
+    def __init__(self, k8s_client, logger=None):
         self.k8s_client = k8s_client
         self._cache_namespaces = []
         self._cache_last = None
-        self.delete_pods = delete_pods
-        self.logger = logger or logging.getLogger(__name__)
+        self.logger = logger or makeLogger(__name__)
         self.last_pods = []
 
     def is_fresh(self, when):
@@ -40,16 +47,36 @@ class K8sInventory():
             return False
         return True
 
+    def preprocess_namespace(self, namespace):
+        # Check if namespace is None instead of using "or" as Kubernetes treats
+        # an empty string as the */all wildcard
+        # always returns a list of namespaces
+        sep = ","
+        if namespace is None:
+            namespaces = ["default"]
+        elif namespace == "*":
+            namespaces = [""]
+        elif sep in namespace:
+            namespaces = namespace.split(sep)
+        else:
+            namespaces = [namespace]
+        # sort and deduplicate
+        namespaces = sorted(list(set(namespaces)))
+        return namespaces
+
     def find_namespaces(self):
         """ Returns all namespaces.
         """
         if self._cache_last is not None and self.is_fresh(self._cache_last):
-            self.logger.info("Using cached namespaces")
+            self.logger.debug("Using cached namespaces")
             return self._cache_namespaces
-        self.logger.info("Reading kubernetes namespaces")
-        namespaces = [
-            item.metadata.name for item in self.k8s_client.list_namespaces()
-        ]
+        self.logger.debug("Reading kubernetes namespaces")
+        namespaces = []
+        try:
+            for item in self.k8s_client.list_namespaces():
+                namespaces.append(item.metadata.name )
+        except Exception as e:
+            self.logger.exception(e)
         self._cache_namespaces = namespaces
         self._cache_last = datetime.now()
         return namespaces
@@ -57,30 +84,32 @@ class K8sInventory():
     def find_deployments(self, namespace=None, labels=None):
         """ Find deployments for a namespace (default to "default" namespace).
         """
-        # Check if namespace is None instead of using "or" as Kubernetes treats
-        # an empty string as the */all wildcard
-        if namespace is None:
-            namespace = "default"
-        return [
-            item.metadata.name
-            for item in self.k8s_client.list_deployments(
-                namespace=namespace,
-                labels=labels,
-            )
-        ]
+        deployments = []
+        for ns in self.preprocess_namespace(namespace):
+            try:
+                for item in self.k8s_client.list_deployments(
+                    namespace=ns,
+                    labels=labels,
+                ):
+                    deployments.append(item.metadata.name)
+            except Exception as e:
+                self.logger.exception(e)
+        return deployments
 
     def find_pods(self, namespace, selector=None, deployment_name=None):
         """ Find pods in a namespace, for a deployment or selector.
         """
-        # Check if namespace is None instead of using "or" as Kubernetes treats
-        # an empty string as the */all wildcard
-        if namespace is None:
-            namespace = "default"
-        pods = self.k8s_client.list_pods(
-            namespace=namespace,
-            selector=selector,
-            deployment_name=deployment_name,
-        )
+        pods = []
+        for ns in self.preprocess_namespace(namespace):
+            try:
+                for pod in self.k8s_client.list_pods(
+                    namespace=ns,
+                    selector=selector,
+                    deployment_name=deployment_name,
+                ):
+                    pods.append(pod)
+            except Exception as e:
+                self.logger.exception(e)
         pod_objects = []
         if pods is not None:
             for i, item in enumerate(pods):
@@ -100,8 +129,9 @@ class K8sInventory():
                             ip=item.status.pod_ip,
                             container_ids=container_ids,
                             restart_count=sum(restart_count),
-                            state=item.status.phase,
+                            state=get_status(item.status),
                             labels=item.metadata.labels,
+                            annotations=item.metadata.annotations,
                             meta=item,
                         ))
         self.last_pods = pod_objects
@@ -112,3 +142,13 @@ class K8sInventory():
         Retrieves all pods for all namespaces
         """
         return self.find_pods("")
+
+    def get_service(self, name, namespace):
+        try:
+            return self.k8s_client.get_service(
+                name=name,
+                namespace=namespace,
+            )
+        except Exception as e:
+            self.logger.exception(e)
+        return None

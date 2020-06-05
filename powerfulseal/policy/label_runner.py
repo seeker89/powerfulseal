@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import logging
+from powerfulseal import makeLogger
 import random
+
 import time
 from datetime import datetime
 
@@ -48,7 +49,7 @@ class LabelRunner:
         self.executor = executor
         self.min_seconds_between_runs = min_seconds_between_runs
         self.max_seconds_between_runs = max_seconds_between_runs
-        self.logger = logger or logging.getLogger(__name__)
+        self.logger = logger or makeLogger(__name__)
         self.namespace = namespace
         self.metric_collector = metric_collector
 
@@ -71,28 +72,25 @@ class LabelRunner:
             self.inventory.sync()
 
     def kill_pod(self, pod):
-        # Find node
-        node = self.inventory.get_node_by_ip(pod.host_ip)
-        if node is None:
-            self.logger.info("Node not found for pod: %s", pod)
-            return
-
-        # Format command
-        signal = "SIGKILL" if pod.labels.get("seal/force-kill", "false") == "true" else "SIGTERM"
-        container_id = random.choice(pod.container_ids)
-        cmd = self.executor.get_kill_command(
-            signal=signal,
-            container_id=container_id.replace("docker://", ""),
-        )
-
-        # Execute command
-        self.logger.info("Action execute '%s' on %r", cmd, pod)
-        for value in self.executor.execute(cmd, nodes=[node]).values():
-            if value["ret_code"] > 0:
-                self.logger.info("Error return code: %s", value)
-                self.metric_collector.add_pod_kill_failed_metric(pod)
-            else:
-                self.metric_collector.add_pod_killed_metric(pod)
+        # prep the arguments
+        signal = "SIGTERM"
+        if pod.get_label_or_annotation("seal/force-kill", "false") == "true":
+            signal = "SIGKILL"
+        # kill the pod
+        success = None
+        try:
+            success = self.executor.kill_pod(pod, self.inventory, signal)
+        except:
+            success = False
+            self.logger.exception("Exception while killing pod")
+        # update the metrics
+        if success:
+            self.metric_collector.add_pod_killed_metric(pod)
+            self.logger.info("Pod killed: %s", pod)
+        else:
+            self.metric_collector.add_pod_kill_failed_metric(pod)
+            self.logger.error("Pod NOT killed: %s", pod)
+        return success
 
     def filter_pods(self, pods):
         filters = [
@@ -108,14 +106,14 @@ class LabelRunner:
         return remaining_pods
 
     def filter_is_enabled(self, pods):
-        return list(filter(lambda pod: pod.labels.get("seal/enabled", "false") == "true", pods))
+        return list(filter(lambda pod: pod.get_label_or_annotation("seal/enabled", "false") == "true", pods))
 
     def filter_kill_probability(self, pods):
         remaining_pods = []
         for pod in pods:
             # Retrieve probability value, performing validation
             try:
-                probability = float(pod.labels.get("seal/kill-probability", "1"))
+                probability = float(pod.get_label_or_annotation("seal/kill-probability", "1"))
                 if probability < 0 or probability > 1:
                     raise ValueError
             except ValueError:
@@ -136,12 +134,12 @@ class LabelRunner:
 
         for pod in pods:
             # Filter on days
-            days_label = pod.labels.get("seal/days", self.DEFAULT_DAYS_LABEL)
+            days_label = pod.get_label_or_annotation("seal/days", self.DEFAULT_DAYS_LABEL)
             if now.weekday() not in self.get_integer_days_from_days_label(days_label):
                 continue
 
             # Filter on start time
-            start_time_label = pod.labels.get("seal/start-time", "10-00-00")
+            start_time_label = pod.get_label_or_annotation("seal/start-time", "10-00-00")
             try:
                 hours, minutes, seconds = self.process_time_label(start_time_label)
                 start_time = now.replace(hour=hours, minute=minutes, second=seconds, microsecond=0)
@@ -152,7 +150,7 @@ class LabelRunner:
                 continue
 
             # Filter on end time
-            end_time_label = pod.labels.get("seal/end-time", "17-30-00")
+            end_time_label = pod.get_label_or_annotation("seal/end-time", "17-30-00")
             try:
                 hours, minutes, seconds = self.process_time_label(end_time_label)
                 end_time = now.replace(hour=hours, minute=minutes, second=seconds, microsecond=0)
@@ -195,7 +193,7 @@ class LabelRunner:
         tokens = label.split('-')
 
         # Ensure tokens is a list of three values ('HH', 'MM', 'SS')
-        if len(tokens) != 3 or not all(map(lambda x: len(x) is 2, tokens)):
+        if len(tokens) != 3 or not all(map(lambda x: len(x) == 2, tokens)):
             raise ValueError("Label be in HH-MM-SS format")
 
         hours = int(tokens[0])

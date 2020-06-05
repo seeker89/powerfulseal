@@ -1,8 +1,8 @@
 INOTIFY_CALL ?= inotifywait -e modify -r ./powerfulseal ./tests
-NPM_CALL ?= cd powerfulseal/web/ui && npm install && npm run build
 TOX_CALL ?= tox -r
 METRICS_SERVER_URL ?= http://metrics-server.kube-system.svc.kubernetes.cluster/
 CLOUD_OPTION ?= --openstack
+SCHEMA_FILE=powerfulseal/policy/ps-schema.yaml
 
 name ?= powerfulseal
 version ?= `python setup.py --version`
@@ -14,9 +14,6 @@ test:
 
 watch:
 	$(TOX_CALL) && while $(INOTIFY_CALL); do $(TOX_CALL); done
-
-web:
-	$(NPM_CALL)
 
 upload:
 	rm -rfv dist
@@ -95,20 +92,6 @@ label:
 			--max-seconds-between-runs 10 \
 			--ssh-allow-missing-host-keys
 
-demo:
-	HTTP_PROXY=  \
-	http_proxy=  \
-	seal \
-		-vv \
-		demo \
-			--kubeconfig ~/.kube/config \
-			${CLOUD_OPTION} \
-			--inventory-kubernetes \
-			--prometheus-collector \
-			--prometheus-host 0.0.0.0 \
-			--prometheus-port 9999 \
-			--ssh-allow-missing-host-keys \
-			--metrics-server-path $(METRICS_SERVER_URL)
 
 
 # THE EXAMPLES BELOW SHOULD WORK FOR MINIKUBE
@@ -156,4 +139,13 @@ minikube-interactive:
 			--ssh-path-to-private-key `minikube ssh-key` \
 			--override-ssh-host `minikube ip`
 
-.PHONY: test watch web upload clean build tag push version autonomous autonomous-headless interactive validate label demo minikube-autonomous minikube-label minikube-interactive
+docs: $(SCHEMA_FILE)
+	# https://coveooss.github.io/json-schema-for-humans/
+	pip install PyYAML json-schema-for-humans
+	cat $(SCHEMA_FILE) | python -c "import sys; import yaml; import json; print(json.dumps(yaml.safe_load(sys.stdin.read()), indent=4, sort_keys=True))" > tmp.json
+	mkdir -p docs/schema
+	generate-schema-doc --no-minify --expand-buttons tmp.json docs/schema/index.html
+	rm tmp.json
+
+.PHONY: test watch upload clean build tag push version autonomous autonomous-headless interactive validate label minikube-autonomous minikube-label minikube-interactive
+

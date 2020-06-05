@@ -19,23 +19,24 @@ import time
 import jsonschema
 import yaml
 import pkgutil
-import logging
-from .pod_scenario import PodScenario
-from .node_scenario import NodeScenario
+from powerfulseal import makeLogger
+from .scenario import Scenario
 
-logger = logging.getLogger(__name__)
+logger = makeLogger(__name__)
 
 
 class PolicyRunner():
     """ Reads, validates and executes a JSON schema-compliant policy
     """
-    DEFAULT_POLICY = {}
+    DEFAULT_POLICY = {
+        "scenarios": []
+    }
 
     @classmethod
     def get_schema(cls):
         """ Reads the schema from the file
         """
-        data = pkgutil.get_data(__name__, "ps-schema.json")
+        data = pkgutil.get_data(__name__, "ps-schema.yaml")
         return yaml.safe_load(data)
 
     @classmethod
@@ -49,7 +50,7 @@ class PolicyRunner():
         try:
             jsonschema.validate(policy, schema)
         except jsonschema.ValidationError as error:
-            logger.info(error)
+            logger.error(error)
             return False
         return True
 
@@ -58,39 +59,38 @@ class PolicyRunner():
             metric_collector=None):
         """ Runs a policy forever
         """
-        config = policy.get("config", {})
+        config = policy.get("config", {}).get("runStrategy", {})
+        should_randomize = config.get("strategy") == "random"
         wait_min = config.get("minSecondsBetweenRuns", 0)
         wait_max = config.get("maxSecondsBetweenRuns", 300)
-        loops = int(config.get("loopsNumber", -1))
-        node_scenarios = [
-            NodeScenario(
-                name=item.get("name"),
-                schema=item,
-                inventory=inventory,
-                driver=driver,
-                executor=executor,
-                metric_collector=metric_collector
-            )
-            for item in policy.get("nodeScenarios", [])
-        ]
-        pod_scenarios = [
-            PodScenario(
+        loops = config.get("runs", None)
+        scenarios = [
+            Scenario(
                 name=item.get("name"),
                 schema=item,
                 inventory=inventory,
                 k8s_inventory=k8s_inventory,
+                driver=driver,
                 executor=executor,
                 metric_collector=metric_collector
             )
-            for item in policy.get("podScenarios", [])
+            for item in policy.get("scenarios", [])
         ]
-        for _ in range(0, loops):
-            for scenario in node_scenarios:
-                scenario.execute()
-            for scenario in pod_scenarios:
-                scenario.execute()
-            sleep_time = int(random.uniform(wait_min, wait_max))
-            logger.info("Sleeping for %s seconds", sleep_time)
-            time.sleep(sleep_time)
+        while loops is None or loops > 0:
+            if not scenarios:
+                return True
+            if should_randomize:
+                random.shuffle(scenarios)
+            for scenario in scenarios:
+                ret = scenario.execute()
+                if not ret:
+                    logger.error("Exiting early")
+                    return False
+                sleep_time = int(random.uniform(wait_min, wait_max))
+                logger.info("Sleeping for %s seconds", sleep_time)
+                time.sleep(sleep_time)
+                if loops is not None:
+                    loops -= 1
             inventory.sync()
-        return node_scenarios, pod_scenarios
+        logger.info("All done here!")
+        return True

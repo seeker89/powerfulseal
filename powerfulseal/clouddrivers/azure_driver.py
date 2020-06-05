@@ -1,6 +1,6 @@
 import os
 import sys
-import logging
+from powerfulseal import makeLogger
 from . import AbstractDriver
 from ..node import Node, NodeState
 
@@ -16,7 +16,7 @@ def create_connection_from_config():
     compute_client = None
     network_client = None
     try:
-        cred_file_loc=os.environ['AZURE_AUTH_LOCATION']
+        os.environ['AZURE_AUTH_LOCATION']
     except KeyError:
         try:
             subscription_id = os.environ['AZURE_SUBSCRIPTION_ID']
@@ -38,40 +38,6 @@ def create_connection_from_config():
 
     return resource_client, compute_client, network_client
 
-def get_all_ips(instance, network_client):
-    """ Returns the private and public ip addresses of an Azure instances
-    """
-    output = []
-    for interface in instance.network_profile.network_interfaces:
-        if_name=" ".join(interface.id.split('/')[-1:])
-        rg="".join(interface.id.split('/')[4])
-
-        try:
-            thing=network_client.network_interfaces.get(rg, if_name).ip_configurations
-            for x in thing:
-                private_ip=x.private_ip_address
-                public_ip=None
-                """print('\nifdata: ',rg,if_name,x.private_ip_address,x.public_ip_address)"""
-                """ Have to extract public IP from public IP class structure...if present """
-                if x.public_ip_address is not None:
-                    public_ip_id=x.public_ip_address.id
-                    public_ip_name=" ".join(public_ip_id.split('/')[-1:])
-                    try:
-                        public_ip_return = network_client.public_ip_addresses.get(rg, public_ip_name)
-                        public_ip=public_ip_return.ip_address
-                    except:
-                        """ Ignore the exception.  return no additional values """
-                        pass
-
-                temp_pair = (private_ip, public_ip)
-                output.append(temp_pair)
-
-        except Exception as e:
-            """ Ignore the exception.  return no additional values """
-            pass
-
-    return output
-
 def server_state(compute_client, server):
     ret_state=NodeState.UNKNOWN
     try:
@@ -84,7 +50,6 @@ def server_state(compute_client, server):
             ret_state=NodeState.DOWN
     except:
         """ignore"""
-        pass
 
     return ret_state
 
@@ -104,19 +69,57 @@ class AzureDriver(AbstractDriver):
     """
 
     def __init__(self, cluster_rg_name=None, cluster_node_rg_name=None, cloud=None, conn=None, logger=None):
-        self.logger = logger or logging.getLogger(__name__)
+        self.logger = logger or makeLogger(__name__)
         self.resource_client, self.compute_client, self.network_client = create_connection_from_config()
         self.remote_servers = []
         self.cluster_rg = cluster_rg_name
         self.cluster_node_rg = cluster_node_rg_name
+        self.ipconfig_cache = {}
+
+    def get_all_ips(self, instance, network_client):
+        """ Returns the private and public ip addresses of an Azure instances
+        """
+        output = []
+        for interface in instance.network_profile.network_interfaces:
+            if_name = " ".join(interface.id.split('/')[-1:])
+            rg = "".join(interface.id.split('/')[4])
+
+            try:
+                thing = self.ipconfig_cache.get(if_name)
+                if thing is None:
+                    thing = network_client.network_interfaces.get(
+                        rg, if_name).ip_configurations
+                    self.ipconfig_cache[if_name] = thing
+                for x in thing:
+                    private_ip = x.private_ip_address
+                    public_ip = None
+                    """print('\nifdata: ',rg,if_name,x.private_ip_address,x.public_ip_address)"""
+                    """ Have to extract public IP from public IP class structure...if present """
+                    if x.public_ip_address is not None:
+                        public_ip_id = x.public_ip_address.id
+                        public_ip_name = " ".join(public_ip_id.split('/')[-1:])
+                        try:
+                            public_ip_return = network_client.public_ip_addresses.get(
+                                rg, public_ip_name)
+                            public_ip = public_ip_return.ip_address
+                        except:
+                            """ Ignore the exception.  return no additional values """
+
+                    temp_pair = (private_ip, public_ip)
+                    output.append(temp_pair)
+
+            except Exception:
+                """ Ignore the exception.  return no additional values """
+
+        return output
 
     def getResourceGroups(self):
         """ Find nodeResourceGroup for the cluster.
             This can be determined by finding the resource groups that are managed_by 
             the cluater resource group ID
         """
-        self.logger.info("++ Azure cluster_rg: %s", self.cluster_rg)
-        self.logger.info("++ Azure cluster_node_rg: %s", self.cluster_node_rg)
+        self.logger.debug("++ Azure cluster_rg: %s", self.cluster_rg)
+        self.logger.debug("++ Azure cluster_node_rg: %s", self.cluster_node_rg)
 
         if self.cluster_node_rg is None:
             if self.cluster_rg is not None:
@@ -145,7 +148,7 @@ class AzureDriver(AbstractDriver):
     def sync(self):
         """ Downloads a fresh set of nodes form the API.
         """
-        self.logger.info("Synchronizing remote nodes")
+        self.logger.debug("Synchronizing remote nodes")
         """only get the resource group for the current cluster 
         """
         self.getResourceGroups()
@@ -162,7 +165,7 @@ class AzureDriver(AbstractDriver):
         """ Retrieve an instance of Node by its IP.
         """
         for server in self.remote_servers:
-            addresses = get_all_ips(server, self.network_client)
+            addresses = self.get_all_ips(server, self.network_client)
             if not addresses:
                 self.logger.warning("No ip addresses found: %s", server.__dict__)
             else:
