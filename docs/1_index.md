@@ -21,10 +21,12 @@ permalink: /
 
 ## Highlights
 
-- works with `kubernetes`, `OpenStack`, `AWS`, `Azure`, `GCP` and local machines
+- works with `Kubernetes`, `OpenStack`, `AWS`, `Azure`, `GCP` and local machines
 - `Prometheus` and `Datadog` metrics collection
 - `yaml` [policies](#policies) describing chaos experiments
 - multiple [modes](./modes)
+
+---
 
 ## Policies
 
@@ -52,6 +54,10 @@ scenarios:
           namespace: myapp
       endpoint: /healthz
 ```
+
+[Learn how to write your own policies](./policies){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
+
+---
 
 ### License
 
